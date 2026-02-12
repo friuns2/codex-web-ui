@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_PATH="/Applications/Codex.app"
-APP_ASAR="$APP_PATH/Contents/Resources/app.asar"
-CLI_PATH="$APP_PATH/Contents/Resources/codex"
+APP_PATH="${CODEX_APP_PATH:-$HOME/apps/CodexDesktop-Rebuild}"
+APP_ASAR=""
+CLI_PATH=""
 PORT="${CODEX_WEBUI_PORT:-5999}"
 TOKEN=""
 ORIGINS=""
 KEEP_TEMP=0
-NO_OPEN=0
 USER_DATA_DIR=""
 BRIDGE_PATH="$(cd "$(dirname "$0")" && pwd)/webui-bridge.js"
 
@@ -18,16 +17,57 @@ Usage:
   launch_codex_webui_unpacked.sh [options] [-- <extra args>]
 
 Options:
-  --app <path>           Codex.app path
+  --app <path>           app root path (Codex.app or Linux build dir/repo)
   --port <n>             webui port (default: 5999)
   --token <value>        pass --token for auth
   --origins <csv>        pass --origins allowlist
   --bridge <path>        standalone webui-bridge.js path
   --user-data-dir <path> chromium user data dir override
-  --no-open              don't open browser
   --keep-temp            keep temp extracted app dir
   -h, --help
 USAGE
+}
+
+resolve_app_paths() {
+  local requested="$1"
+  local resolved=""
+  local machine arch
+
+  if [[ -f "$requested/Contents/Resources/app.asar" ]]; then
+    resolved="$requested"
+  elif [[ -f "$requested/resources/app.asar" ]]; then
+    resolved="$requested"
+  elif [[ -d "$requested/out" ]]; then
+    machine="$(uname -m)"
+    case "$machine" in
+      x86_64|amd64) arch="x64" ;;
+      aarch64|arm64) arch="arm64" ;;
+      *) arch="$machine" ;;
+    esac
+    if [[ -f "$requested/out/Codex-linux-${arch}/resources/app.asar" ]]; then
+      resolved="$requested/out/Codex-linux-${arch}"
+    else
+      resolved="$(find "$requested/out" -maxdepth 1 -type d -name 'Codex-linux-*' | head -n1 || true)"
+    fi
+  fi
+
+  [[ -n "$resolved" ]] || {
+    echo "Could not locate Codex app resources from: $requested" >&2
+    echo "Expected one of:" >&2
+    echo "  - <path>/Contents/Resources/app.asar (macOS app bundle)" >&2
+    echo "  - <path>/resources/app.asar (Linux build dir)" >&2
+    echo "  - <path>/out/Codex-linux-*/resources/app.asar (Linux rebuild repo)" >&2
+    exit 1
+  }
+
+  APP_PATH="$resolved"
+  if [[ -f "$APP_PATH/Contents/Resources/app.asar" ]]; then
+    APP_ASAR="$APP_PATH/Contents/Resources/app.asar"
+    CLI_PATH="$APP_PATH/Contents/Resources/codex"
+  else
+    APP_ASAR="$APP_PATH/resources/app.asar"
+    CLI_PATH="$APP_PATH/resources/codex"
+  fi
 }
 
 write_main_injection_chunk() {
@@ -977,7 +1017,7 @@ EXTRA_ARGS=()
 while (($#)); do
   case "$1" in
     --app)
-      APP_PATH="${2:?missing value}"; APP_ASAR="$APP_PATH/Contents/Resources/app.asar"; CLI_PATH="$APP_PATH/Contents/Resources/codex"; shift 2 ;;
+      APP_PATH="${2:?missing value}"; shift 2 ;;
     --port)
       PORT="${2:?missing value}"; shift 2 ;;
     --token)
@@ -988,8 +1028,6 @@ while (($#)); do
       BRIDGE_PATH="${2:?missing value}"; shift 2 ;;
     --user-data-dir)
       USER_DATA_DIR="${2:?missing value}"; shift 2 ;;
-    --no-open)
-      NO_OPEN=1; shift ;;
     --keep-temp)
       KEEP_TEMP=1; shift ;;
     -h|--help)
@@ -1001,6 +1039,8 @@ while (($#)); do
   esac
 done
 
+resolve_app_paths "$APP_PATH"
+
 [[ -f "$APP_ASAR" ]] || { echo "Missing app.asar: $APP_ASAR" >&2; exit 1; }
 [[ -x "$CLI_PATH" ]] || { echo "Missing codex binary: $CLI_PATH" >&2; exit 1; }
 [[ -f "$BRIDGE_PATH" ]] || { echo "Missing standalone bridge file: $BRIDGE_PATH" >&2; exit 1; }
@@ -1009,6 +1049,7 @@ command -v node >/dev/null 2>&1 || { echo "node is required" >&2; exit 1; }
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-webui-unpacked.XXXXXX")"
 APP_DIR="$WORKDIR/app"
+APP_CONTENT_ROOT="$APP_DIR"
 if [[ -z "$USER_DATA_DIR" ]]; then
   USER_DATA_DIR="$WORKDIR/user-data"
 fi
@@ -1025,20 +1066,27 @@ trap cleanup EXIT
 echo "Extracting app.asar to: $APP_DIR"
 npx -y @electron/asar extract "$APP_ASAR" "$APP_DIR"
 
-target_main_js_rel="$(sed -nE 's@.*(main-[A-Za-z0-9_-]+\.js).*@\1@p' "$APP_DIR/.vite/build/main.js" | head -n1 || true)"
-target_renderer_js_rel="$(sed -nE 's@.*assets/(index-[A-Za-z0-9_-]+\.js).*@\1@p' "$APP_DIR/webview/index.html" | head -n1 || true)"
+if [[ -d "$APP_DIR/src/.vite/build" && -f "$APP_DIR/src/webview/index.html" ]]; then
+  APP_CONTENT_ROOT="$APP_DIR/src"
+  if [[ ! -e "$APP_DIR/webview" ]]; then
+    ln -s "$APP_DIR/src/webview" "$APP_DIR/webview"
+  fi
+fi
+
+target_main_js_rel="$(sed -nE 's@.*(main-[A-Za-z0-9_-]+\.js).*@\1@p' "$APP_CONTENT_ROOT/.vite/build/main.js" | head -n1 || true)"
+target_renderer_js_rel="$(sed -nE 's@.*assets/(index-[A-Za-z0-9_-]+\.js).*@\1@p' "$APP_CONTENT_ROOT/webview/index.html" | head -n1 || true)"
 [[ -n "$target_main_js_rel" && -n "$target_renderer_js_rel" ]] || { echo "Failed resolving target bundle names" >&2; exit 1; }
 
 MAIN_CHUNK_FILE="$WORKDIR/main-webui.chunk.js"
 write_main_injection_chunk "$MAIN_CHUNK_FILE"
-apply_main_chunk "$APP_DIR/.vite/build/$target_main_js_rel" "$MAIN_CHUNK_FILE"
-patch_renderer_bundle "$APP_DIR/webview/assets/$target_renderer_js_rel"
+apply_main_chunk "$APP_CONTENT_ROOT/.vite/build/$target_main_js_rel" "$MAIN_CHUNK_FILE"
+patch_renderer_bundle "$APP_CONTENT_ROOT/webview/assets/$target_renderer_js_rel"
 
-cp "$BRIDGE_PATH" "$APP_DIR/webview/webui-bridge.js"
+cp "$BRIDGE_PATH" "$APP_CONTENT_ROOT/webview/webui-bridge.js"
 
-rg -q -- '__CODEX_WEBUI_RUNTIME_PATCH__' "$APP_DIR/.vite/build/$target_main_js_rel" || { echo "Patched main missing runtime marker" >&2; exit 1; }
-rg -q -- '!Array\.isArray\([[:alnum:]_$]+\.roots\)' "$APP_DIR/webview/assets/$target_renderer_js_rel" || { echo "Patched renderer missing roots guard" >&2; exit 1; }
-rg -q 'sendMessageFromView' "$APP_DIR/webview/webui-bridge.js" || { echo "Bridge file looks invalid" >&2; exit 1; }
+grep -Fq '__CODEX_WEBUI_RUNTIME_PATCH__' "$APP_CONTENT_ROOT/.vite/build/$target_main_js_rel" || { echo "Patched main missing runtime marker" >&2; exit 1; }
+grep -Eq '!Array\.isArray\([[:alnum:]_$]+\.roots\)' "$APP_CONTENT_ROOT/webview/assets/$target_renderer_js_rel" || { echo "Patched renderer missing roots guard" >&2; exit 1; }
+grep -Fq 'sendMessageFromView' "$APP_CONTENT_ROOT/webview/webui-bridge.js" || { echo "Bridge file looks invalid" >&2; exit 1; }
 
 CMD=(npx electron "--user-data-dir=$USER_DATA_DIR" "$APP_DIR" --webui --port "$PORT")
 if [[ -n "$TOKEN" ]]; then
@@ -1059,22 +1107,5 @@ export CUSTOM_CLI_PATH="$CLI_PATH"
 echo "App dir: $APP_DIR"
 echo "User data dir: $USER_DATA_DIR"
 printf 'Command:'; printf ' %q' "${CMD[@]}"; echo
-
-if [[ "$NO_OPEN" -eq 0 ]]; then
-  (
-    if command -v curl >/dev/null 2>&1; then
-      for _ in {1..120}; do
-        if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
-          open "http://127.0.0.1:${PORT}/" >/dev/null 2>&1 || true
-          exit 0
-        fi
-        sleep 0.25
-      done
-    else
-      sleep 1
-      open "http://127.0.0.1:${PORT}/" >/dev/null 2>&1 || true
-    fi
-  ) &
-fi
 
 exec "${CMD[@]}"
