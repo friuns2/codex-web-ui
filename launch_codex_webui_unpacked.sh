@@ -5,7 +5,6 @@ APP_PATH="/Applications/Codex.app"
 APP_ASAR="$APP_PATH/Contents/Resources/app.asar"
 CLI_PATH="$APP_PATH/Contents/Resources/codex"
 PORT="${CODEX_WEBUI_PORT:-5999}"
-REMOTE=0
 TOKEN=""
 ORIGINS=""
 KEEP_TEMP=0
@@ -21,8 +20,7 @@ Usage:
 Options:
   --app <path>           Codex.app path
   --port <n>             webui port (default: 5999)
-  --remote               pass --remote
-  --token <value>        pass --token for remote mode auth
+  --token <value>        pass --token for auth
   --origins <csv>        pass --origins allowlist
   --bridge <path>        standalone webui-bridge.js path
   --user-data-dir <path> chromium user data dir override
@@ -47,7 +45,6 @@ write_main_injection_chunk() {
 
   function webUiParseCliOptions(argv = process.argv, env = process.env) {
     let enabled = false;
-    let remote = false;
     let port = webUiParsePortArg(env.CODEX_WEBUI_PORT, 3210);
     let token = (env.CODEX_WEBUI_TOKEN ?? "").trim();
     let origins = (env.CODEX_WEBUI_ORIGINS ?? "")
@@ -59,10 +56,6 @@ write_main_injection_chunk() {
       const arg = argv[i];
       if (arg === "--webui") {
         enabled = true;
-        continue;
-      }
-      if (arg === "--remote") {
-        remote = true;
         continue;
       }
       if (arg === "--port" && i + 1 < argv.length) {
@@ -93,7 +86,7 @@ write_main_injection_chunk() {
       }
     }
 
-    return { enabled, remote, port, token, origins };
+    return { enabled, port, token, origins };
   }
 
   const webUiOptions = webUiParseCliOptions();
@@ -485,8 +478,8 @@ write_main_injection_chunk() {
 
   async function webUiStartBridgeRuntime({ bridgeWindow, context }) {
     const assetRoot = path.join(L.app.getAppPath(), "webview");
-    const host = webUiOptions.remote ? "0.0.0.0" : "127.0.0.1";
-    const authRequired = webUiOptions.remote || !!webUiOptions.token;
+    const host = "0.0.0.0";
+    const authRequired = !!webUiOptions.token;
     const token =
       authRequired && !webUiOptions.token
         ? crypto.randomBytes(24).toString("hex")
@@ -719,7 +712,7 @@ write_main_injection_chunk() {
 
         let bucketStart = Date.now();
         let count = 0;
-        const inboundLimit = webUiOptions.remote ? 240 : 5000;
+        const inboundLimit = 5000;
 
         ws.on("message", async (raw) => {
           const now = Date.now();
@@ -732,7 +725,6 @@ write_main_injection_chunk() {
             webUiLogger.warning("WebUI inbound rate limit exceeded", {
               count,
               limit: inboundLimit,
-              remote: webUiOptions.remote,
             });
             ws.close(1008, "Rate limit exceeded");
             return;
@@ -814,7 +806,6 @@ write_main_injection_chunk() {
     webUiLogger.info("WebUI bridge started", {
       host,
       port: webUiOptions.port,
-      remote: webUiOptions.remote,
       authRequired,
       originAllowlist: [...originAllowlist],
     });
@@ -989,8 +980,6 @@ while (($#)); do
       APP_PATH="${2:?missing value}"; APP_ASAR="$APP_PATH/Contents/Resources/app.asar"; CLI_PATH="$APP_PATH/Contents/Resources/codex"; shift 2 ;;
     --port)
       PORT="${2:?missing value}"; shift 2 ;;
-    --remote)
-      REMOTE=1; shift ;;
     --token)
       TOKEN="${2:?missing value}"; shift 2 ;;
     --origins)
@@ -1052,9 +1041,6 @@ rg -q -- '!Array\.isArray\([[:alnum:]_$]+\.roots\)' "$APP_DIR/webview/assets/$ta
 rg -q 'sendMessageFromView' "$APP_DIR/webview/webui-bridge.js" || { echo "Bridge file looks invalid" >&2; exit 1; }
 
 CMD=(npx electron "--user-data-dir=$USER_DATA_DIR" "$APP_DIR" --webui --port "$PORT")
-if [[ "$REMOTE" -eq 1 ]]; then
-  CMD+=(--remote)
-fi
 if [[ -n "$TOKEN" ]]; then
   CMD+=(--token "$TOKEN")
 fi

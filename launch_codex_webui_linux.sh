@@ -432,6 +432,15 @@ else
     win.on("show", () => { setTimeout(hideNow, 0); });
   }
 
+  // --- Early webContents.send interception state ---
+  // These must be declared before webUiStartBridgeRuntime which references them.
+  const IPC_CHANNEL_EARLY = "codex_desktop:message-for-view";
+  const WORKER_PREFIX_EARLY = "codex_desktop:worker:";
+  let earlyInterceptedMessages = [];
+  let earlyInterceptActive = false;
+  let earlyOriginalSend = null;
+  let earlyInterceptedWin = null;
+
   async function webUiStartBridgeRuntime({ bridgeWindow }) {
     const appPath = electron.app.getAppPath();
     let assetRoot = path.join(appPath, "webview");
@@ -471,9 +480,8 @@ else
       }
     };
 
-    // Intercept webContents.send to mirror IPC to WebSocket
-    const originalSend = bridgeWindow.webContents.send.bind(bridgeWindow.webContents);
-    bridgeWindow.webContents.send = (channel, ...args) => {
+    // --- Helper: forward an IPC channel+args to WebSocket clients ---
+    const forwardToWs = (channel, args) => {
       if (channel === IPC_CHANNEL) {
         broadcast({ kind: "message-for-view", payload: args[0] });
       } else if (channel.startsWith(WORKER_PREFIX) && channel.endsWith(":for-view")) {
@@ -483,7 +491,80 @@ else
           payload: args[0],
         });
       }
+    };
+
+    // Intercept webContents.send to forward IPC to WebSocket.
+    // The early intercept (set in browser-window-created) already
+    // suppresses Codex IPC channels from reaching the renderer.
+    // Now we upgrade it to forward to WebSocket instead of just queuing.
+    const originalSend = earlyOriginalSend ?? bridgeWindow.webContents.send.bind(bridgeWindow.webContents);
+    bridgeWindow.webContents.send = (channel, ...args) => {
+      if (channel === IPC_CHANNEL
+          || (channel.startsWith(WORKER_PREFIX) && channel.endsWith(":for-view"))) {
+        // Forward to WebSocket only — do NOT send to bridgeWindow renderer
+        forwardToWs(channel, args);
+        return;
+      }
+      // Non-Codex channels: pass through to renderer as normal
       originalSend(channel, ...args);
+    };
+
+    // Flush any messages queued by the early intercept
+    if (earlyInterceptedMessages && earlyInterceptedMessages.length > 0) {
+      webUiLog.info("Flushing", earlyInterceptedMessages.length, "early-intercepted messages to WebSocket");
+      for (const { channel, args } of earlyInterceptedMessages) {
+        forwardToWs(channel, args);
+      }
+    }
+    earlyInterceptedMessages = null; // disable queuing, future calls go direct
+
+    // --- IPC broadcast interception ---
+    // The app's internal broadcast loop skips the originator window
+    // (bridgeWindow) when sending thread-stream-state-changed updates.
+    // Since there is only one real window, sentCount=0 and the WebSocket
+    // never receives state updates (the UI gets stuck after the first msg).
+    //
+    // The broadcast also writes to an internal IPC socket (ipcClient).
+    // We intercept net.Socket.prototype.write to capture these IPC
+    // broadcast messages and forward them to the WebSocket clients.
+    // We tag IPC sockets so we only intercept writes on them.
+    // Intercept net.Socket writes to capture IPC broadcast messages.
+    // The IPC socket may already be connected before our injection runs,
+    // so instead of tagging sockets at connect-time we inspect all
+    // Buffer writes that match the length-prefixed JSON format used by
+    // the internal IPC protocol. The check is cheap: we only parse JSON
+    // when the peek string contains '"type":"broadcast"'.
+    const netModule = require("node:net");
+    const origSocketWrite = netModule.Socket.prototype.write;
+    netModule.Socket.prototype.write = function(data, ...rest) {
+      if (Buffer.isBuffer(data) && data.length > 8 && sockets.size > 0) {
+        try {
+          const msgLen = data.readUInt32LE(0);
+          if (msgLen > 4 && msgLen <= data.length - 4 && msgLen < 5 * 1024 * 1024) {
+            // Peek at the first ~30 bytes for a quick "broadcast" check
+            const peek = data.toString("utf8", 4, Math.min(4 + 40, 4 + msgLen));
+            if (peek.includes('"type":"broadcast"')) {
+              const jsonStr = data.toString("utf8", 4, 4 + msgLen);
+              const msg = JSON.parse(jsonStr);
+              if (msg.type === "broadcast" && typeof msg.method === "string") {
+                broadcast({
+                  kind: "message-for-view",
+                  payload: {
+                    type: "ipc-broadcast",
+                    method: msg.method,
+                    sourceClientId: msg.sourceClientId ?? null,
+                    version: msg.version ?? 1,
+                    params: msg.params,
+                  },
+                });
+              }
+            }
+          }
+        } catch {
+          // Not an IPC message or parse error — ignore
+        }
+      }
+      return origSocketWrite.call(this, data, ...rest);
     };
 
     // HTTP server
@@ -696,6 +777,7 @@ else
         sockets.clear();
         await new Promise(r => server.close(() => r()));
         bridgeWindow.webContents.send = originalSend;
+        netModule.Socket.prototype.write = origSocketWrite;
       },
     };
   }
@@ -727,11 +809,35 @@ else
   }
 
   // Suppress all windows in WebUI mode
+  // Also intercept webContents.send on the FIRST window created,
+  // BEFORE the renderer loads — this prevents the Immer error #18
+  // caused by the renderer receiving Codex IPC messages it didn't request.
   electron.app.on("browser-window-created", (_event, win) => {
     if (!webUiOptions.enabled || !win || win.isDestroyed()) return;
     webUiForceWindowHidden(win);
     win.once("ready-to-show", () => { webUiForceWindowHidden(win); });
     setImmediate(() => { webUiForceWindowHidden(win); });
+
+    // Intercept webContents.send on the first window immediately
+    if (!earlyInterceptActive && win.webContents && !win.webContents.isDestroyed()) {
+      earlyInterceptActive = true;
+      earlyInterceptedWin = win;
+      earlyOriginalSend = win.webContents.send.bind(win.webContents);
+      webUiLog.info("Early intercept: patching webContents.send on window id", win.webContents.id);
+      win.webContents.send = (channel, ...args) => {
+        if (channel === IPC_CHANNEL_EARLY
+            || (channel.startsWith(WORKER_PREFIX_EARLY) && channel.endsWith(":for-view"))) {
+          // Queue for later WebSocket forwarding (bridge not ready yet)
+          // or forward immediately if bridge is ready
+          if (earlyInterceptedMessages !== null) {
+            earlyInterceptedMessages.push({ channel, args });
+          }
+          // Do NOT send to the renderer — suppress Immer corruption
+          return;
+        }
+        earlyOriginalSend(channel, ...args);
+      };
+    }
   });
 
   electron.app.whenReady().then(() => {
