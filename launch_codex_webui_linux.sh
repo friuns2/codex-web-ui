@@ -979,6 +979,31 @@ fs.writeFileSync(mainFile, source, "utf8");
 NODE
 }
 
+patch_main_disable_notifications() {
+  local main_file="$1"
+  node - "$main_file" <<'NODE'
+const fs = require("node:fs");
+const mainFile = process.argv[2];
+let source = fs.readFileSync(mainFile, "utf8");
+const marker = "__CODEX_WEBUI_NOTIFICATIONS_DISABLED__";
+if (source.includes(marker)) {
+  process.exit(0);
+}
+
+const methodRegex = /showNotification\(([^)]*)\)\{/;
+if (!methodRegex.test(source)) {
+  console.error("Desktop notification patch anchor not found.");
+  process.exit(1);
+}
+
+source = source.replace(
+  methodRegex,
+  (_match, args) => `showNotification(${args}){/*${marker}*/return;`
+);
+fs.writeFileSync(mainFile, source, "utf8");
+NODE
+}
+
 patch_renderer_bundle() {
   local renderer_file="$1"
   node - "$renderer_file" <<'NODE'
@@ -1080,11 +1105,13 @@ target_renderer_js_rel="$(sed -nE 's@.*assets/(index-[A-Za-z0-9_-]+\.js).*@\1@p'
 MAIN_CHUNK_FILE="$WORKDIR/main-webui.chunk.js"
 write_main_injection_chunk "$MAIN_CHUNK_FILE"
 apply_main_chunk "$APP_CONTENT_ROOT/.vite/build/$target_main_js_rel" "$MAIN_CHUNK_FILE"
+patch_main_disable_notifications "$APP_CONTENT_ROOT/.vite/build/$target_main_js_rel"
 patch_renderer_bundle "$APP_CONTENT_ROOT/webview/assets/$target_renderer_js_rel"
 
 cp "$BRIDGE_PATH" "$APP_CONTENT_ROOT/webview/webui-bridge.js"
 
 grep -Fq '__CODEX_WEBUI_RUNTIME_PATCH__' "$APP_CONTENT_ROOT/.vite/build/$target_main_js_rel" || { echo "Patched main missing runtime marker" >&2; exit 1; }
+grep -Fq '__CODEX_WEBUI_NOTIFICATIONS_DISABLED__' "$APP_CONTENT_ROOT/.vite/build/$target_main_js_rel" || { echo "Patched main missing notifications marker" >&2; exit 1; }
 grep -Eq '!Array\.isArray\([[:alnum:]_$]+\.roots\)' "$APP_CONTENT_ROOT/webview/assets/$target_renderer_js_rel" || { echo "Patched renderer missing roots guard" >&2; exit 1; }
 grep -Fq 'sendMessageFromView' "$APP_CONTENT_ROOT/webview/webui-bridge.js" || { echo "Bridge file looks invalid" >&2; exit 1; }
 
@@ -1094,6 +1121,18 @@ if [[ -n "$TOKEN" ]]; then
 fi
 if [[ -n "$ORIGINS" ]]; then
   CMD+=(--origins "$ORIGINS")
+fi
+# In headless/Xvfb runs, Linux desktop notifications can block on DBus and stall the UI.
+# Disable notifications unless the caller explicitly overrides via extra args.
+disable_notifications_arg_present=0
+for extra_arg in "${EXTRA_ARGS[@]}"; do
+  if [[ "$extra_arg" == "--disable-notifications" ]]; then
+    disable_notifications_arg_present=1
+    break
+  fi
+done
+if [[ "$disable_notifications_arg_present" -eq 0 ]]; then
+  CMD+=(--disable-notifications)
 fi
 if ((${#EXTRA_ARGS[@]})); then
   CMD+=("${EXTRA_ARGS[@]}")
