@@ -9,7 +9,7 @@ set -euo pipefail
 ###############################################################################
 
 CODEX_DIR="${CODEX_DIR:-$HOME/apps/CodexDesktop-Rebuild}"
-PORT="${CODEX_WEBUI_PORT:-4310}"
+PORT="${CODEX_WEBUI_PORT:-5999}"
 REMOTE=0
 TOKEN=""
 ORIGINS=""
@@ -24,7 +24,7 @@ Usage:
 
 Options:
   --codex-dir <path>     CodexDesktop-Rebuild directory (default: ~/apps/CodexDesktop-Rebuild)
-  --port <n>             WebUI port (default: 4310)
+  --port <n>             WebUI port (default: 5999)
   --remote               Bind to 0.0.0.0 instead of 127.0.0.1
   --token <value>        Auth token for remote mode
   --origins <csv>        Allowed origins CSV
@@ -155,6 +155,17 @@ else
   const crypto = require("node:crypto");
   const { EventEmitter } = require("node:events");
   const electron = require("electron");
+
+  function webUiFormatError(err) {
+    if (!err) return "Unknown error";
+    if (typeof err === "string") return err;
+    if (typeof err.message === "string" && err.message.length > 0) return err.message;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
 
   // Simple logger that works regardless of the app's internal logger
   const webUiLog = {
@@ -312,6 +323,33 @@ else
   // ---- Discover internal app references at runtime ----
   // We hook into BrowserWindow creation to find the primary window and its context.
 
+  async function webUiInvokeElectronBridgeMethod(windowRef, method, args) {
+    if (!windowRef || windowRef.isDestroyed()) return null;
+    const code = `
+      Promise.resolve().then(async () => {
+        const bridge = window.electronBridge;
+        if (!bridge || typeof bridge[${JSON.stringify(method)}] !== "function") return null;
+        return await bridge[${JSON.stringify(method)}](...${JSON.stringify(args)});
+      });
+    `;
+    return windowRef.webContents.executeJavaScript(code, true);
+  }
+
+  async function webUiDispatchMessageFromView(bridgeWindow, context, payload) {
+    // Prefer the renderer bridge API; it is stable across minified builds.
+    const bridged = await webUiInvokeElectronBridgeMethod(bridgeWindow, "sendMessageFromView", [
+      payload,
+    ]);
+    if (bridged !== null) return;
+
+    // Fallback for older/newer app internals.
+    if (context && typeof context.handleMessage === "function") {
+      await context.handleMessage(bridgeWindow.webContents, payload);
+      return;
+    }
+    throw new Error("No message dispatch handler available for WebUI bridge");
+  }
+
   async function waitForPrimaryWindow(timeoutMs = 30000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -321,6 +359,35 @@ else
       await new Promise(r => setTimeout(r, 50));
     }
     return null;
+  }
+
+  function webUiForceWindowHidden(win) {
+    if (!win || win.isDestroyed()) return;
+    const hideNow = () => {
+      try {
+        win.hide();
+      } catch {}
+    };
+
+    hideNow();
+
+    if (!win.__codexWebUiShowPatched) {
+      win.__codexWebUiShowPatched = true;
+      if (typeof win.show === "function") {
+        win.show = () => {
+          hideNow();
+        };
+      }
+      if (typeof win.showInactive === "function") {
+        win.showInactive = () => {
+          hideNow();
+        };
+      }
+    }
+
+    win.on("show", () => {
+      setTimeout(hideNow, 0);
+    });
   }
 
   // Find the message handler context by intercepting IPC
@@ -372,7 +439,7 @@ else
       try { serialized = JSON.stringify(packet); } catch { return; }
       for (const ws of sockets) {
         if (ws.readyState !== WebUiSocket.OPEN) continue;
-        ws.send(serialized, (err) => { if (err) webUiLog.warning("WS send failed", err.message); });
+        ws.send(serialized, (err) => { if (err) webUiLog.warning("WS send failed", webUiFormatError(err)); });
       }
     };
 
@@ -524,7 +591,8 @@ else
           const mime = mimeMap[ext] || "application/octet-stream";
           res.setHeader("Content-Type", mime.includes("charset") ? mime : `${mime}; charset=utf-8`);
           res.setHeader("Cache-Control", "no-store");
-          fs.createReadStream(resolved).on("error", () => {
+          fs.createReadStream(resolved).on("error", (err) => {
+            webUiLog.warning("WebUI static stream failed", webUiFormatError(err));
             if (!res.headersSent) { res.statusCode = 500; res.setHeader("Content-Type", "text/plain"); }
             res.end("Internal Server Error");
           }).pipe(res);
@@ -564,9 +632,22 @@ else
       }
 
       wss.handleUpgrade(req, socket, head, (ws) => {
+        // Single active client policy: newer tab takes over and prior tabs are disconnected.
+        for (const existing of sockets) {
+          try {
+            existing.send(
+              JSON.stringify({
+                kind: "bridge-error",
+                message: "Another tab took over this session",
+              }),
+            );
+            existing.close(1012, "Replaced by newer client tab");
+          } catch {}
+        }
+
         sockets.add(ws);
         ws.on("close", () => sockets.delete(ws));
-        ws.on("ws-error", (err) => webUiLog.warning("WS error", err.message));
+        ws.on("ws-error", (err) => webUiLog.warning("WS error", webUiFormatError(err)));
 
         let bucketStart = Date.now(), count = 0;
         const inboundLimit = webUiOptions.remote ? 240 : 5000;
@@ -585,11 +666,7 @@ else
               const payload = packet.payload;
               if (!payload || typeof payload.type !== "string") return;
 
-              if (messageHandlerFn) {
-                await messageHandlerFn(bridgeWindow.webContents, payload);
-              } else {
-                webUiLog.warning("No message handler available yet");
-              }
+              await webUiDispatchMessageFromView(bridgeWindow, { handleMessage: messageHandlerFn ? async (wc, p) => messageHandlerFn(wc, p) : null }, payload);
 
               if (payload.type === "ready") {
                 broadcast({
@@ -618,11 +695,11 @@ else
                   });
                 `;
                 await bridgeWindow.webContents.executeJavaScript(code, true);
-              } catch (e) { webUiLog.warning("Worker message forward failed", e.message); }
+              } catch (e) { webUiLog.warning("Worker message forward failed", webUiFormatError(e)); }
               return;
             }
           } catch (err) {
-            webUiLog.warning("Bridge dispatch failed", err.message);
+            webUiLog.warning("Bridge dispatch failed", webUiFormatError(err));
             ws.send(JSON.stringify({ kind: "bridge-error", message: "Bridge dispatch failed" }));
           }
         });
@@ -665,17 +742,15 @@ else
       const primaryWindow = await waitForPrimaryWindow();
       if (!primaryWindow) throw new Error("Timed out waiting for primary window");
       webUiBridgeWindow = primaryWindow;
-
-      // Hide the Electron window — we're serving via HTTP
-      try { primaryWindow.hide(); } catch {}
+      webUiForceWindowHidden(primaryWindow);
 
       primaryWindow.on("close", (event) => {
         if (!electron.app.isQuitting) {
           event.preventDefault();
-          try { primaryWindow.hide(); } catch {}
+          webUiForceWindowHidden(primaryWindow);
         }
       });
-      primaryWindow.on("minimize", () => { try { primaryWindow.hide(); } catch {} });
+      primaryWindow.on("minimize", () => { webUiForceWindowHidden(primaryWindow); });
 
       webUiRuntime = await webUiStartBridgeRuntime({ bridgeWindow: primaryWindow });
       return webUiRuntime;
@@ -686,23 +761,24 @@ else
   // Suppress all windows in WebUI mode
   electron.app.on("browser-window-created", (_event, win) => {
     if (!webUiOptions.enabled || !win || win.isDestroyed()) return;
-    win.once("ready-to-show", () => { try { win.hide(); } catch {} });
-    setImmediate(() => { try { win.hide(); } catch {} });
+    webUiForceWindowHidden(win);
+    win.once("ready-to-show", () => { webUiForceWindowHidden(win); });
+    setImmediate(() => { webUiForceWindowHidden(win); });
   });
 
   electron.app.whenReady().then(() => {
-    webUiStart().catch((err) => webUiLog.error("WebUI start failed", err));
+    webUiStart().catch((err) => webUiLog.error("WebUI start failed", webUiFormatError(err)));
   });
 
   electron.app.on("activate", () => {
     if (!webUiOptions.enabled) return;
     const win = webUiBridgeWindow;
-    if (win && !win.isDestroyed()) { try { win.hide(); } catch {} }
+    if (win && !win.isDestroyed()) { webUiForceWindowHidden(win); }
   });
 
   electron.app.on("will-quit", () => {
     if (webUiRuntime && typeof webUiRuntime.dispose === "function") {
-      webUiRuntime.dispose().catch((err) => webUiLog.warning("Shutdown failed", err));
+      webUiRuntime.dispose().catch((err) => webUiLog.warning("Shutdown failed", webUiFormatError(err)));
       webUiRuntime = null;
     }
   });
@@ -742,34 +818,37 @@ fi
 ###############################################################################
 # Step 3: Patch renderer bundle — add Array.isArray guard for roots
 ###############################################################################
-RENDERER_FIND="if(!v)return;const T=v.roots.map(A4),A=g.current;"
-RENDERER_REPLACE="if(!v||!Array.isArray(v.roots))return;const T=v.roots.map(A4),A=g.current;"
-
-if grep -qF '!Array.isArray(v.roots)' "$RENDERER_JS"; then
+if grep -qP '!Array\.isArray\([[:alnum:]_$]+\.roots\)' "$RENDERER_JS"; then
   echo "Renderer already patched, skipping."
 else
   echo "Patching renderer bundle..."
-  node - "$RENDERER_JS" <<NODE
+  node - "$RENDERER_JS" <<'NODE'
 const fs = require("node:fs");
-const file = process.argv[2];
-let source = fs.readFileSync(file, "utf8");
-const find = $(printf '%s' "$RENDERER_FIND" | node -e "process.stdout.write(JSON.stringify(require('fs').readFileSync('/dev/stdin','utf8')))");
-const replace = $(printf '%s' "$RENDERER_REPLACE" | node -e "process.stdout.write(JSON.stringify(require('fs').readFileSync('/dev/stdin','utf8')))");
-if (!source.includes(find)) {
-  // Try to find a similar pattern
-  const altFind = source.match(/if\(!v\)return;const \w+=v\.roots\.map\(\w+\),\w+=\w+\.current;/);
-  if (altFind) {
-    const altReplace = altFind[0].replace("if(!v)return;", "if(!v||!Array.isArray(v.roots))return;");
-    source = source.replace(altFind[0], altReplace);
-    console.log("Renderer patched with alternative pattern:", altFind[0]);
-  } else {
-    console.error("Renderer guard patch anchor not found - skipping (may still work).");
-    process.exit(0);
-  }
-} else {
+const rendererFile = process.argv[2];
+let source = fs.readFileSync(rendererFile, "utf8");
+
+// Older bundle shape (kept for compatibility).
+const find = "if(!v)return;const M=v.roots.map(A4),A=g.current;";
+const replace = "if(!v||!Array.isArray(v.roots))return;const M=v.roots.map(A4),A=g.current;";
+if (source.includes(find)) {
   source = source.replace(find, replace);
+  fs.writeFileSync(rendererFile, source, "utf8");
+  process.exit(0);
 }
-fs.writeFileSync(file, source, "utf8");
+
+// Newer bundle shape where minified variable names change between builds.
+const generic = /if\(!([A-Za-z_$][\w$]*)\)return;const ([A-Za-z_$][\w$]*)=\1\.roots\.map\(A4\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.current;/;
+if (generic.test(source)) {
+  source = source.replace(
+    generic,
+    "if(!$1||!Array.isArray($1.roots))return;const $2=$1.roots.map(A4),$3=$4.current;"
+  );
+  fs.writeFileSync(rendererFile, source, "utf8");
+  process.exit(0);
+}
+
+console.error("Renderer guard patch anchor not found - skipping (may still work).");
+process.exit(0);
 NODE
   echo "Renderer patched."
 fi
@@ -790,6 +869,7 @@ fi
 echo ""
 echo "Verifying patches..."
 grep -qF '__CODEX_WEBUI_RUNTIME_PATCH__' "$MAIN_JS" || { echo "FAIL: Main bundle missing runtime marker" >&2; exit 1; }
+grep -qP '!Array\.isArray\([[:alnum:]_$]+\.roots\)' "$RENDERER_JS" 2>/dev/null || echo "Note: Renderer roots guard not verified (may still work)."
 grep -qF 'sendMessageFromView' "$WEBVIEW_DIR/webui-bridge.js" || { echo "FAIL: Bridge file invalid" >&2; exit 1; }
 echo "All patches verified."
 
