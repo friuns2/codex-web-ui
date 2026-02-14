@@ -1,4 +1,0 @@
-- generic [ref=e6]:
-  - img [ref=e7]
-  - text: Oops, an error has occurred
-  - button "Try again" [ref=e11] [cursor=pointer]
