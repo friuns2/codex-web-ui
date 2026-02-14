@@ -9,6 +9,16 @@ This guide documents exactly how `--webui` was added in the readable Codex build
 - `/Users/igor/temp/untitled folder 67/codex_reverse/readable/webview/assets/index-BnRAGF7J.js`
 - `/Users/igor/temp/untitled folder 67/codex_reverse/readable/package.json`
 
+## Minification-safe patching guidelines
+
+When patching bundled Electron output, avoid relying on build-specific minified identifiers.
+
+- Prefer stable Electron imports (`require("electron")`) over internal short names.
+- Use `BrowserWindow.getAllWindows()` to discover windows instead of app-private globals.
+- Detect IPC payloads by payload shape (`{ type: string }`) rather than fixed minified channel IDs.
+- Generate `/webui-config.js` from explicit runtime values, not from opaque internal symbols.
+- Treat names like `L`, `Vt`, `Pt`, `Dde`, `bt`, `sn`, `ma`, `Ya` as unstable and non-portable.
+
 ## 1) Add `--webui` CLI mode
 
 In main process bundle, parse CLI/env switches and keep options in `webUiOptions`.
@@ -45,15 +55,13 @@ function webUiParseCliOptions(argv = process.argv, env = process.env) {
 In `app.whenReady()`, do not create normal window when `--webui` is enabled.
 
 ```js
-await Bp.refresh();
+const electron = require("electron");
+const app = electron.app;
+const BrowserWindow = electron.BrowserWindow;
+// ... normal startup ...
 if (webUiOptions.enabled) {
-  webUiBridgeWindow = await webUiCreateBridgeWindow();
-  webUiRuntime = await webUiStartBridgeRuntime({
-    bridgeWindow: webUiBridgeWindow,
-    context: Dde,
-  });
-} else {
-  await kc(Pt);
+  const win = BrowserWindow.getAllWindows().find((w) => w && !w.isDestroyed());
+  webUiRuntime = await webUiStartBridgeRuntime({ bridgeWindow: win, context: null });
 }
 ```
 
@@ -96,9 +104,20 @@ Main trick: intercept `bridgeWindow.webContents.send` and mirror IPC events to W
 ```js
 const originalSend = bridgeWindow.webContents.send.bind(bridgeWindow.webContents);
 bridgeWindow.webContents.send = (channel, ...args) => {
-  if (channel === bt) {
-    broadcast({ kind: "message-for-view", payload: args[0] });
-  } else if (channel.startsWith("codex_desktop:worker:") && channel.endsWith(":for-view")) {
+  const payload = args.find(
+    (value) =>
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      typeof value.type === "string",
+  );
+  if (payload) {
+    broadcast({ kind: "message-for-view", payload });
+  } else if (
+    typeof channel === "string" &&
+    channel.startsWith("codex_desktop:worker:") &&
+    channel.endsWith(":for-view")
+  ) {
     broadcast({
       kind: "worker-message-for-view",
       workerId: channel.slice("codex_desktop:worker:".length, -":for-view".length),
@@ -152,6 +171,36 @@ window.dispatchEvent(new MessageEvent("message", { data: packet.payload }));
 
 ## 6) Stability fixes added after testing
 
+### A0) Forward IPC payload from any argument slot
+
+In newer bundles, IPC payload is not always `args[0]`. Use first object arg with `type`.
+
+```js
+bridgeWindow.webContents.send = (channel, ...args) => {
+  const payload = args.find(
+    (value) =>
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      typeof value.type === "string",
+  );
+  if (payload) {
+    broadcast({ kind: "message-for-view", payload });
+  } else if (
+    typeof channel === "string" &&
+    channel.startsWith("codex_desktop:worker:") &&
+    channel.endsWith(":for-view")
+  ) {
+    broadcast({
+      kind: "worker-message-for-view",
+      workerId: channel.slice("codex_desktop:worker:".length, -":for-view".length),
+      payload: args[0],
+    });
+  }
+  originalSend(channel, ...args);
+};
+```
+
 ### A) Single active socket guard
 
 Avoid duplicate WS sessions and duplicated events:
@@ -180,12 +229,15 @@ F5("client-status-changed", (e) => {
 In main message handler (`type: "ready"`):
 
 ```js
-e.send(bt, {
-  type: "ipc-broadcast",
-  method: "client-status-changed",
-  sourceClientId: "desktop",
-  version: Fs("client-status-changed"),
-  params: { status: "connected" },
+broadcast({
+  kind: "message-for-view",
+  payload: {
+    type: "ipc-broadcast",
+    method: "client-status-changed",
+    sourceClientId: null,
+    version: 1,
+    params: { status: "connected" },
+  },
 });
 ```
 
@@ -231,3 +283,35 @@ open http://127.0.0.1:4310/
 - `app.asar` and `app.asar.unpacked` are coupled.
 - Renaming archive without matching `.unpacked` path can break extraction tooling.
 - Safest workflow is patching a copy of the app bundle, then replacing atomically.
+
+## 9) Log Triage and Fixes (Current Launcher)
+
+### Fixed in launcher
+
+- Force production flavor to remove dev-only startup failures/noise:
+
+```bash
+export BUILD_FLAVOR=prod
+export NODE_ENV=production
+```
+
+This removes recurring devbox cache errors like:
+- `Applied devbox cache refresh failed ... spawn applied ENOENT`
+
+### Expected/noise (can be ignored for WebUI health)
+
+- `No owner repo found for remote task ...`
+- `IpcClient ... no handler is configured ...`
+- `No promise for request ID ...`
+- Git scan noise such as `config --get remote.upstream.url` exitCode `1`
+
+### Actual blocker signatures
+
+- `WebUI runtime start failed ... EADDRINUSE` (port already used)
+- `Renderer guard patch anchor not found` (bundle pattern mismatch)
+
+Use a free port to avoid EADDRINUSE:
+
+```bash
+./launch_codex_webui_unpacked.sh --port 6002
+```

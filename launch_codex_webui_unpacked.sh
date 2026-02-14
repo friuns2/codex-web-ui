@@ -5,7 +5,6 @@ APP_PATH="/Applications/Codex.app"
 APP_ASAR="$APP_PATH/Contents/Resources/app.asar"
 CLI_PATH="$APP_PATH/Contents/Resources/codex"
 PORT="${CODEX_WEBUI_PORT:-5999}"
-REMOTE=0
 TOKEN=""
 ORIGINS=""
 KEEP_TEMP=0
@@ -21,8 +20,7 @@ Usage:
 Options:
   --app <path>           Codex.app path
   --port <n>             webui port (default: 5999)
-  --remote               pass --remote
-  --token <value>        pass --token for remote mode auth
+  --token <value>        pass --token for auth
   --origins <csv>        pass --origins allowlist
   --bridge <path>        standalone webui-bridge.js path
   --user-data-dir <path> chromium user data dir override
@@ -47,7 +45,6 @@ write_main_injection_chunk() {
 
   function webUiParseCliOptions(argv = process.argv, env = process.env) {
     let enabled = false;
-    let remote = false;
     let port = webUiParsePortArg(env.CODEX_WEBUI_PORT, 3210);
     let token = (env.CODEX_WEBUI_TOKEN ?? "").trim();
     let origins = (env.CODEX_WEBUI_ORIGINS ?? "")
@@ -59,10 +56,6 @@ write_main_injection_chunk() {
       const arg = argv[i];
       if (arg === "--webui") {
         enabled = true;
-        continue;
-      }
-      if (arg === "--remote") {
-        remote = true;
         continue;
       }
       if (arg === "--port" && i + 1 < argv.length) {
@@ -93,17 +86,26 @@ write_main_injection_chunk() {
       }
     }
 
-    return { enabled, remote, port, token, origins };
+    return { enabled, port, token, origins };
   }
 
   const webUiOptions = webUiParseCliOptions();
   if (!webUiOptions.enabled) return;
+
+  const electron = require("electron");
+  const app = electron?.app;
+  const BrowserWindow = electron?.BrowserWindow;
+  if (!app || !BrowserWindow) {
+    console.error("[webui] Electron app APIs unavailable.");
+    return;
+  }
 
   const http = require("node:http");
   const fs = require("node:fs");
   const path = require("node:path");
   const crypto = require("node:crypto");
   const { EventEmitter } = require("node:events");
+  let webUiAppIsQuitting = false;
   function webUiFormatError(err) {
     if (!err) return "Unknown error";
     if (typeof err === "string") return err;
@@ -447,7 +449,7 @@ write_main_injection_chunk() {
   async function waitForPrimaryWindow(timeoutMs = 30000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      const win = Vt.getPrimaryWindow(Pt);
+      const win = BrowserWindow.getAllWindows().find((candidate) => candidate && !candidate.isDestroyed());
       if (win && !win.isDestroyed()) return win;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -484,9 +486,9 @@ write_main_injection_chunk() {
   }
 
   async function webUiStartBridgeRuntime({ bridgeWindow, context }) {
-    const assetRoot = path.join(L.app.getAppPath(), "webview");
-    const host = webUiOptions.remote ? "0.0.0.0" : "127.0.0.1";
-    const authRequired = webUiOptions.remote || !!webUiOptions.token;
+    const assetRoot = path.join(app.getAppPath(), "webview");
+    const host = "0.0.0.0";
+    const authRequired = !!webUiOptions.token;
     const token =
       authRequired && !webUiOptions.token
         ? crypto.randomBytes(24).toString("hex")
@@ -527,12 +529,23 @@ write_main_injection_chunk() {
 
     const originalSend = bridgeWindow.webContents.send.bind(bridgeWindow.webContents);
     bridgeWindow.webContents.send = (channel, ...args) => {
-      if (channel === bt) {
+      const payload = args.find(
+        (value) =>
+          value &&
+          typeof value === "object" &&
+          !Array.isArray(value) &&
+          typeof value.type === "string",
+      );
+      if (payload) {
         broadcast({
           kind: "message-for-view",
-          payload: args[0],
+          payload,
         });
-      } else if (channel.startsWith("codex_desktop:worker:") && channel.endsWith(":for-view")) {
+      } else if (
+        typeof channel === "string" &&
+        channel.startsWith("codex_desktop:worker:") &&
+        channel.endsWith(":for-view")
+      ) {
         broadcast({
           kind: "worker-message-for-view",
           workerId: channel.slice("codex_desktop:worker:".length, -":for-view".length),
@@ -565,9 +578,9 @@ write_main_injection_chunk() {
       if (parsedUrl.pathname === "/webui-config.js") {
         const config = JSON.stringify({
           wsPath: "/ws",
-          buildFlavor: sn,
-          sentryInitOptions: ma,
-          appSessionId: Ya,
+          buildFlavor: process.env.BUILD_FLAVOR ?? "prod",
+          sentryInitOptions: null,
+          appSessionId: null,
         });
         res.setHeader("Content-Type", "application/javascript; charset=utf-8");
         res.setHeader("Cache-Control", "no-store");
@@ -719,7 +732,7 @@ write_main_injection_chunk() {
 
         let bucketStart = Date.now();
         let count = 0;
-        const inboundLimit = webUiOptions.remote ? 240 : 5000;
+        const inboundLimit = 5000;
 
         ws.on("message", async (raw) => {
           const now = Date.now();
@@ -732,7 +745,6 @@ write_main_injection_chunk() {
             webUiLogger.warning("WebUI inbound rate limit exceeded", {
               count,
               limit: inboundLimit,
-              remote: webUiOptions.remote,
             });
             ws.close(1008, "Rate limit exceeded");
             return;
@@ -814,7 +826,6 @@ write_main_injection_chunk() {
     webUiLogger.info("WebUI bridge started", {
       host,
       port: webUiOptions.port,
-      remote: webUiOptions.remote,
       authRequired,
       originAllowlist: [...originAllowlist],
     });
@@ -858,7 +869,7 @@ write_main_injection_chunk() {
       webUiForceWindowHidden(primaryWindow);
 
       const preventClose = (event) => {
-        if (!Vt.isAppQuitting) {
+        if (!webUiAppIsQuitting) {
           event.preventDefault();
           webUiForceWindowHidden(primaryWindow);
         }
@@ -870,7 +881,7 @@ write_main_injection_chunk() {
 
       webUiRuntime = await webUiStartBridgeRuntime({
         bridgeWindow: primaryWindow,
-        context: Dde,
+        context: null,
       });
 
       return webUiRuntime;
@@ -879,7 +890,7 @@ write_main_injection_chunk() {
     return webUiStartPromise;
   }
 
-  L.app.on("browser-window-created", (_event, win) => {
+  app.on("browser-window-created", (_event, win) => {
     if (!webUiOptions.enabled) return;
     if (win && !win.isDestroyed()) {
       webUiForceWindowHidden(win);
@@ -892,7 +903,7 @@ write_main_injection_chunk() {
     }
   });
 
-  L.app.whenReady().then(() => {
+  app.whenReady().then(() => {
       webUiStart().catch((err) => {
         webUiLogger.warning("WebUI runtime start failed", {
         message: webUiFormatError(err),
@@ -900,15 +911,21 @@ write_main_injection_chunk() {
     });
   });
 
-  L.app.on("activate", () => {
+  app.on("before-quit", () => {
+    webUiAppIsQuitting = true;
+  });
+
+  app.on("activate", () => {
     if (!webUiOptions.enabled) return;
-    const win = webUiBridgeWindow ?? Vt.getPrimaryWindow(Pt);
+    const win =
+      webUiBridgeWindow ??
+      BrowserWindow.getAllWindows().find((candidate) => candidate && !candidate.isDestroyed());
     if (win && !win.isDestroyed()) {
       webUiForceWindowHidden(win);
     }
   });
 
-  L.app.on("will-quit", () => {
+  app.on("will-quit", () => {
     if (webUiRuntime && typeof webUiRuntime.dispose === "function") {
       webUiRuntime.dispose().catch((err) => {
         webUiLogger.warning("WebUI shutdown failed", {
@@ -955,6 +972,10 @@ const fs = require("node:fs");
 const rendererFile = process.argv[2];
 let source = fs.readFileSync(rendererFile, "utf8");
 
+if (/!Array\.isArray\([A-Za-z_$][\w$]*\.roots\)/.test(source)) {
+  process.exit(0);
+}
+
 // Older bundle shape (kept for compatibility).
 const find = "if(!v)return;const M=v.roots.map(A4),A=g.current;";
 const replace = "if(!v||!Array.isArray(v.roots))return;const M=v.roots.map(A4),A=g.current;";
@@ -965,11 +986,22 @@ if (source.includes(find)) {
 }
 
 // Newer bundle shape where minified variable names change between builds.
-const generic = /if\(!([A-Za-z_$][\w$]*)\)return;const ([A-Za-z_$][\w$]*)=\1\.roots\.map\(A4\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.current;/;
+const generic = /if\(!([A-Za-z_$][\w$]*)\)return;const ([A-Za-z_$][\w$]*)=\1\.roots\.map\(([A-Za-z_$][\w$]*)\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.current;/;
 if (generic.test(source)) {
   source = source.replace(
     generic,
-    "if(!$1||!Array.isArray($1.roots))return;const $2=$1.roots.map(A4),$3=$4.current;"
+    "if(!$1||!Array.isArray($1.roots))return;const $2=$1.roots.map($3),$4=$5.current;"
+  );
+  fs.writeFileSync(rendererFile, source, "utf8");
+  process.exit(0);
+}
+
+// Bundle shape with `const M=v.roots.map(A4),A=g.current;` and no preceding guard.
+const rootsMapOnly = /const ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.roots\.map\(([A-Za-z_$][\w$]*)\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.current;/;
+if (rootsMapOnly.test(source)) {
+  source = source.replace(
+    rootsMapOnly,
+    "if(!$2||!Array.isArray($2.roots))return;const $1=$2.roots.map($3),$4=$5.current;"
   );
   fs.writeFileSync(rendererFile, source, "utf8");
   process.exit(0);
@@ -977,8 +1009,6 @@ if (generic.test(source)) {
 
 console.error("Renderer guard patch anchor not found.");
 process.exit(1);
-
-fs.writeFileSync(rendererFile, source, "utf8");
 NODE
 }
 
@@ -989,8 +1019,6 @@ while (($#)); do
       APP_PATH="${2:?missing value}"; APP_ASAR="$APP_PATH/Contents/Resources/app.asar"; CLI_PATH="$APP_PATH/Contents/Resources/codex"; shift 2 ;;
     --port)
       PORT="${2:?missing value}"; shift 2 ;;
-    --remote)
-      REMOTE=1; shift ;;
     --token)
       TOKEN="${2:?missing value}"; shift 2 ;;
     --origins)
@@ -1052,9 +1080,6 @@ rg -q -- '!Array\.isArray\([[:alnum:]_$]+\.roots\)' "$APP_DIR/webview/assets/$ta
 rg -q 'sendMessageFromView' "$APP_DIR/webview/webui-bridge.js" || { echo "Bridge file looks invalid" >&2; exit 1; }
 
 CMD=(npx electron "--user-data-dir=$USER_DATA_DIR" "$APP_DIR" --webui --port "$PORT")
-if [[ "$REMOTE" -eq 1 ]]; then
-  CMD+=(--remote)
-fi
 if [[ -n "$TOKEN" ]]; then
   CMD+=(--token "$TOKEN")
 fi
@@ -1067,6 +1092,8 @@ fi
 
 unset ELECTRON_RUN_AS_NODE
 export ELECTRON_FORCE_IS_PACKAGED=true
+export BUILD_FLAVOR=prod
+export NODE_ENV=production
 export CODEX_CLI_PATH="$CLI_PATH"
 export CUSTOM_CLI_PATH="$CLI_PATH"
 
