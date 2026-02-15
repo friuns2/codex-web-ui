@@ -1,5 +1,51 @@
 # WebUI Bridge Patch Guide (Codex Electron)
 
+## Unpacked launcher and SSH mode
+
+Use `/Users/igor/.codex/worktrees/5b82/untitled folder 67/launch_codex_unpacked.sh` to run Codex from extracted `app.asar` with debug flags and optional SSH host auto-start.
+
+### Capabilities
+
+- Node inspector enabled by default (`--inspect`)
+- Chromium CDP enabled by default (`--remote-debugging-port`)
+- Optional SSH host bootstrap via `--ssh-host <user@host>`
+
+### SSH mode workflow
+
+When `--ssh-host` is provided, the launcher:
+
+1. Runs SSH preflight (`BatchMode=yes`, `ConnectTimeout`) and warns if unreachable.
+2. Writes the host into `~/.codex/.codex-global-state.json` under `electron-ssh-hosts` (host first).
+3. Patches extracted unpacked `main-*.js` to auto-open first SSH host window on startup.
+
+Injected runtime marker:
+
+- `/*__CODEX_SSH_AUTOSTART_PATCH__*/`
+
+### Verification procedure
+
+1. Check host reachability:
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=10 ubuntu@149.118.68.1 'echo ok'
+```
+
+2. Run unpacked launcher in SSH mode:
+
+```bash
+bash ./launch_codex_unpacked.sh --ssh-host ubuntu@149.118.68.1
+```
+
+3. Validate logs contain SSH app-server lifecycle lines:
+- `Codex app-server connection state changed ... next=connecting`
+- `stdio_transport_spawned ... executablePath=ssh`
+- `initialize_handshake_result ... outcome=success|failure`
+
+### Known failure/success examples
+
+- `ubuntu@149.118.68.1`: network timeout (`ssh: connect to host 149.118.68.1 port 22: Operation timed out`)
+- `ubuntu@149.118.68.145`: handshake and connected state succeed
+
 This guide documents exactly how `--webui` was added in the readable Codex build, how IPC was bridged to WebSocket, and how WebUI was exposed in a browser.
 
 ## Patched Files
@@ -284,7 +330,75 @@ open http://127.0.0.1:4310/
 - Renaming archive without matching `.unpacked` path can break extraction tooling.
 - Safest workflow is patching a copy of the app bundle, then replacing atomically.
 
-## 9) Log Triage and Fixes (Current Launcher)
+## 9) SSH Reverse-Engineering Findings
+
+Original investigation of how Codex Desktop uses SSH internally.
+
+### Scope
+
+- Unpacked Electron build analysis (`app.asar` extracted)
+- SSH execution path in worker runtime
+- Remote Codex home resolution behavior
+
+### Remote host detection
+
+- Remote mode is enabled when host config kind is `ssh` or `brix`.
+
+### Command execution model
+
+- Remote commands are executed by building an argument list from `hostConfig.terminal_command`.
+- Generic remote process runner appends:
+  - `--`
+  - environment assignments (if any)
+  - requested command args
+
+### SSH helper behavior
+
+- Dedicated SSH command helper wraps commands with:
+  - `sh -lc <quoted command>`
+- Enforced SSH options:
+  - `-o BatchMode=yes`
+  - `-o ConnectTimeout=10`
+
+### Git over remote
+
+- Git command executor routes remote git commands through remote shell execution.
+- Uses non-interactive mode via `GIT_TERMINAL_PROMPT=0`.
+
+### Remote patch/apply flow
+
+For remote apply operations, implementation performs:
+
+1. Create temp dir (`mktemp -d ...`)
+2. Write patch file (`cat > ...`)
+3. Check file existence (`test -e`)
+4. Run `git apply --3way ...`
+5. Cleanup temp dir (`rm -rf`)
+
+### Remote Codex home resolution
+
+- Resolution command checks:
+  - `$CODEX_HOME` if set
+  - otherwise `$HOME/.codex`
+
+Observed on test host:
+- SSH non-interactive connection succeeded.
+- `CODEX_HOME` env var: not set.
+- `~/.codex`: exists.
+- Effective Codex home fallback is `/home/ubuntu/.codex`.
+
+### Risks / notes
+
+- No explicit `StrictHostKeyChecking` or `known_hosts` overrides were observed in the checked SSH helper path.
+- Actual auth and host-key behavior depends on existing SSH client/user config on the machine running Codex.
+
+### Optional follow-ups
+
+1. Add a startup check that prints resolved remote Codex home for each configured SSH host.
+2. Add explicit host-key policy controls in host configuration if stricter behavior is required.
+3. Add an automated smoke test that exercises remote `git apply` path end-to-end.
+
+## 10) Log Triage and Fixes (Current Launcher)
 
 ### Fixed in launcher
 

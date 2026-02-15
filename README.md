@@ -124,8 +124,7 @@ codex-unpacked-toolkit/
 ├── 🔧 launch_codex_unpacked.sh          # SSH unlock & debug launcher
 ├── 🌐 launch_codex_webui_unpacked.sh     # WebUI mode launcher (browser access)
 ├── 🔌 webui-bridge.js                    # Browser-side WebSocket ↔ IPC bridge
-├── 📖 guide.md                           # Deep-dive patching guide
-├── 🔬 ssh codex investication spec.md    # Reverse-engineering findings
+├── 📖 PROJECT_STATE.md                    # Living project state & patching reference
 ├── 📂 images/                            # Screenshots & proof it works
 │   ├── mobile-chat-session.jpeg          # Codex chat from mobile phone
 │   └── mobile-skills-browser.jpeg        # Skills manager from mobile phone
@@ -248,7 +247,7 @@ codex-unpacked-toolkit/
 
 ## 🔬 How We Found It — The Investigation
 
-> See the full reverse-engineering spec in [`ssh codex investication spec.md`](ssh%20codex%20investication%20spec.md)
+> See the full reverse-engineering findings in [`PROJECT_STATE.md` § 9](PROJECT_STATE.md#9-ssh-reverse-engineering-findings)
 
 We extracted the `app.asar`, deobfuscated the minified bundles, and traced the execution paths. Here's what we found hiding in plain sight:
 
