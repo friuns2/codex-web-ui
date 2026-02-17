@@ -513,4 +513,20 @@ install_node_with_fnm() {
   fnm install --lts || return 1
   fnm use --lts || return 1
 }
+
+## 12) GitHub Release Automation (release per push)
+
+Added workflow:
+
+- `/Users/igor/.codex/worktrees/5b82/untitled folder 67/.github/workflows/release-on-push.yml`
+
+Behavior:
+
+1. Triggers on every push to any branch.
+2. Uses `softprops/action-gh-release@v2`.
+3. Creates a unique tag per workflow run:
+   - `auto-${{ github.run_number }}-${{ github.sha }}`
+4. Publishes non-draft, non-prerelease release.
+5. Includes launcher instruction text in release notes:
+   - `open terminal and drag launch_codex_webui_unpacked.sh to it`
 ```

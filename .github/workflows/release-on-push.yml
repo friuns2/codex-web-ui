@@ -1,0 +1,26 @@
+name: Release On Push
+
+on:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release tag and publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: auto-${{ github.run_number }}-${{ github.sha }}
+          name: Auto Release ${{ github.run_number }}
+          body: |
+            Automated release created from push.
+
+            Instruction:
+            open terminal and drag launch_codex_webui_unpacked.sh to it
+          draft: false
+          prerelease: false
