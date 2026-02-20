@@ -78,6 +78,17 @@ We reverse-engineered the minified Electron bundle and built scripts that **patc
 
 ---
 
+## ⚡ Quick Start
+
+```bash
+# Run directly from npm (no clone needed)
+npx -y codex-web-ui --port 5999
+```
+
+Open `http://127.0.0.1:5999/` and you're flying. ✈️
+
+---
+
 ## 🌍 What Can You Actually Do With This?
 
 With the Web UI enabled, Codex breaks free from the Electron window — and with SSH mode unlocked, it reaches **any machine you own**:
@@ -98,17 +109,6 @@ With the Web UI enabled, Codex breaks free from the Electron window — and with
 | 🏗️ **Multi-Machine Refactoring** | Coordinate code changes across microservices running on different hosts simultaneously |
 
 > **TL;DR:** Codex in your browser + SSH to any machine = your entire infrastructure as one AI-powered IDE. 🧠
-
----
-
-## ⚡ Quick Start
-
-```bash
-# Run directly from npm (no clone needed)
-npx -y codex-web-ui --port 5999
-```
-
-Open `http://127.0.0.1:5999/` and you're flying. ✈️
 
 ---
 
