@@ -1,6 +1,6 @@
 {
   "name": "codex-web-ui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Launch Codex Desktop Web UI from CLI",
   "license": "MIT",
   "bin": {
