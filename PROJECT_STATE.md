@@ -548,6 +548,49 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec "$DIR/launch_codex_webui_unpacked.sh" "$@"
 ```
 
+## 14) SSH Autostart Dynamic Target Discovery (Cross-Version)
+
+Updated file:
+
+- `/Users/igor/.codex/worktrees/5b82/untitled folder 67/launch_codex_unpacked.sh`
+
+### Problem fixed
+
+Previous SSH autostart patching depended on one exact minified anchor:
+
+```js
+await kp.refresh({triggerProviderRefresh:!0}),await bu(Gt),await pM.flushPendingDeepLinks()
+```
+
+When Codex obfuscation changed across versions, this exact string often disappeared and patching failed with:
+
+- `SSH autostart patch anchor not found.`
+
+### New patch strategy
+
+Launcher now performs dynamic sequence discovery using a regex over semantic call structure (refresh -> open target -> flush deep links), then rewrites only the first matched sequence.
+
+```js
+const sequenceRe = /await\s+([A-Za-z_$][\w$]*)\.refresh\(\{triggerProviderRefresh:!0\}\)\s*,\s*await\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\s*,\s*await\s+([A-Za-z_$][\w$]*)\.flushPendingDeepLinks\(\)/g;
+const matches = Array.from(source.matchAll(sequenceRe));
+```
+
+If no sequence matches, launcher emits:
+
+- `SSH autostart patch anchor not found (dynamic matcher).`
+
+### Host source decoupling from minified internals
+
+Patched code no longer relies on internal minified getters (e.g. `IJ(Co)` style names). Instead it resolves the host from persistent global state at runtime:
+
+```js
+const __codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || "", ".codex");
+const __codexStateFile = path.join(__codexHome, ".codex-global-state.json");
+const __codexHosts = Array.isArray(parsed?.["electron-ssh-hosts"]) ? parsed["electron-ssh-hosts"] : [];
+```
+
+If host list has entries, first host is used as startup target; otherwise launcher falls back to original default target variable from the matched sequence.
+
 Issue found after publish:
 
 - `npx codex-web-ui --help` failed because npm executes the command through a symlink in `node_modules/.bin`, so `BASH_SOURCE[0]` resolved to `.bin` instead of package `bin/`.

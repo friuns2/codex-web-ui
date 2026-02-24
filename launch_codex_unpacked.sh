@@ -223,15 +223,36 @@ let source = fs.readFileSync(file, "utf8");
 const marker = "__CODEX_SSH_AUTOSTART_PATCH__";
 if (source.includes(marker)) process.exit(0);
 
-const target = "await kp.refresh({triggerProviderRefresh:!0}),await bu(Gt),await pM.flushPendingDeepLinks()";
-if (!source.includes(target)) {
-  console.error("SSH autostart patch anchor not found.");
+const sequenceRe = /await\s+([A-Za-z_$][\w$]*)\.refresh\(\{triggerProviderRefresh:!0\}\)\s*,\s*await\s+([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\s*,\s*await\s+([A-Za-z_$][\w$]*)\.flushPendingDeepLinks\(\)/g;
+const matches = Array.from(source.matchAll(sequenceRe));
+if (matches.length === 0) {
+  console.error("SSH autostart patch anchor not found (dynamic matcher).");
   process.exit(1);
 }
 
+const [fullMatch, refreshObj, openFn, defaultTarget, deepLinkObj] = matches[0];
 const replacement =
-  'await kp.refresh({triggerProviderRefresh:!0});/*__CODEX_SSH_AUTOSTART_PATCH__*/const __codexSshHosts=IJ(Co);if(__codexSshHosts.length>0){await bu(__codexSshHosts[0].id)}else await bu(Gt);await pM.flushPendingDeepLinks()';
-source = source.replace(target, replacement);
+  `await ${refreshObj}.refresh({triggerProviderRefresh:!0});` +
+  `/*__CODEX_SSH_AUTOSTART_PATCH__*/` +
+  `let __codexDefaultTarget=${defaultTarget};` +
+  `try{` +
+  `const __codexReq=(typeof require==="function"?require:globalThis.require);` +
+  `if(typeof __codexReq==="function"){` +
+  `const __codexFs=__codexReq("node:fs");` +
+  `const __codexPath=__codexReq("node:path");` +
+  `const __codexHome=process.env.CODEX_HOME||__codexPath.join(process.env.HOME||"",".codex");` +
+  `const __codexStateFile=__codexPath.join(__codexHome,".codex-global-state.json");` +
+  `if(__codexFs.existsSync(__codexStateFile)){` +
+  `const __codexRaw=__codexFs.readFileSync(__codexStateFile,"utf8");` +
+  `const __codexParsed=JSON.parse(__codexRaw);` +
+  `const __codexHosts=Array.isArray(__codexParsed?.["electron-ssh-hosts"])?__codexParsed["electron-ssh-hosts"]:[];` +
+  `if(__codexHosts.length>0&&typeof __codexHosts[0]==="string"&&__codexHosts[0].trim()){__codexDefaultTarget=__codexHosts[0].trim()}` +
+  `}` +
+  `}` +
+  `}catch{}` +
+  `await ${openFn}(__codexDefaultTarget),await ${deepLinkObj}.flushPendingDeepLinks()`;
+
+source = source.replace(fullMatch, replacement);
 fs.writeFileSync(file, source, "utf8");
 NODE
 }

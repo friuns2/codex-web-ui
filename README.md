@@ -195,7 +195,7 @@ npx -y codex-web-ui --port 5999
 
 1. 📦 **Extracts `app.asar`** — Unpacks the Codex Electron bundle into a temp directory using `@electron/asar`
 2. 🔑 **Injects SSH host into global state** — Writes your SSH host into `.codex-global-state.json` so the app recognizes it as a configured remote
-3. 🧬 **Patches the main bundle** — Performs a surgical AST-level patch on the minified `main-*.js` to auto-select the SSH host on startup (finds the startup sequence and rewires it to check `electron-ssh-hosts` first)
+3. 🧬 **Patches the main bundle** — Performs a surgical startup-sequence patch on minified `main-*.js` to auto-select the SSH host on startup (dynamically discovers the target sequence and rewires it to check `electron-ssh-hosts` first)
 4. 🔍 **Enables Node Inspector** — Launches with `--inspect` for live debugging (port 9229 by default)
 5. 🌐 **Enables Chromium Remote Debug** — Opens `--remote-debugging-port` (9222) for DevTools Protocol access
 6. ✅ **SSH preflight check** — Validates connectivity to your host with `BatchMode=yes` and `ConnectTimeout=6` before launching
