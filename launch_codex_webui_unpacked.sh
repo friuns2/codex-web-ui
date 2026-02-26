@@ -1131,6 +1131,7 @@ const rendererFile = process.argv[2];
 let source = fs.readFileSync(rendererFile, "utf8");
 
 if (/!Array\.isArray\([A-Za-z_$][\w$]*\.roots\)/.test(source)) {
+  console.error("[webui] Renderer guard already present; skipping patch.");
   process.exit(0);
 }
 
@@ -1140,6 +1141,7 @@ const replace = "if(!v||!Array.isArray(v.roots))return;const M=v.roots.map(A4),A
 if (source.includes(find)) {
   source = source.replace(find, replace);
   fs.writeFileSync(rendererFile, source, "utf8");
+  console.error("[webui] Renderer guard patch applied (legacy anchor).");
   process.exit(0);
 }
 
@@ -1151,6 +1153,7 @@ if (generic.test(source)) {
     "if(!$1||!Array.isArray($1.roots))return;const $2=$1.roots.map($3),$4=$5.current;"
   );
   fs.writeFileSync(rendererFile, source, "utf8");
+  console.error("[webui] Renderer guard patch applied (generic guarded anchor).");
   process.exit(0);
 }
 
@@ -1162,11 +1165,16 @@ if (rootsMapOnly.test(source)) {
     "if(!$2||!Array.isArray($2.roots))return;const $1=$2.roots.map($3),$4=$5.current;"
   );
   fs.writeFileSync(rendererFile, source, "utf8");
+  console.error("[webui] Renderer guard patch applied (roots-map anchor).");
   process.exit(0);
 }
 
-console.error("Renderer guard patch anchor not found.");
-process.exit(1);
+if (/\.roots\.map\(/.test(source)) {
+  console.error("[webui] Renderer guard patch anchor not found; continuing without renderer patch (bundle shape changed).");
+} else {
+  console.error("[webui] Renderer roots-map pattern not detected; renderer patch not required.");
+}
+process.exit(0);
 NODE
 }
 
@@ -1233,7 +1241,6 @@ patch_renderer_bundle "$APP_DIR/webview/assets/$target_renderer_js_rel"
 cp "$BRIDGE_PATH" "$APP_DIR/webview/webui-bridge.js"
 
 has_pattern '__CODEX_WEBUI_RUNTIME_PATCH__' "$APP_DIR/.vite/build/$target_main_js_rel" || { echo "Patched main missing runtime marker" >&2; exit 1; }
-has_pattern '!Array\.isArray\([[:alnum:]_$]+\.roots\)' "$APP_DIR/webview/assets/$target_renderer_js_rel" || { echo "Patched renderer missing roots guard" >&2; exit 1; }
 has_pattern 'sendMessageFromView' "$APP_DIR/webview/webui-bridge.js" || { echo "Bridge file looks invalid" >&2; exit 1; }
 
 CMD=(npx -y electron "--user-data-dir=$USER_DATA_DIR" "$APP_DIR" --webui --port "$PORT")

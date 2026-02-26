@@ -423,7 +423,7 @@ This removes recurring devbox cache errors like:
 ### Actual blocker signatures
 
 - `WebUI runtime start failed ... EADDRINUSE` (port already used)
-- `Renderer guard patch anchor not found` (bundle pattern mismatch)
+- `Patched main missing runtime marker` (main runtime injection did not apply)
 
 Use a free port to avoid EADDRINUSE:
 
@@ -546,6 +546,56 @@ Initial wrapper used:
 ```bash
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec "$DIR/launch_codex_webui_unpacked.sh" "$@"
+```
+
+## 15) WebUI Renderer Guard Patch: Non-Fatal Fallback for New Bundle Shapes
+
+Updated file:
+
+- `/Users/igor/.codex/worktrees/5b82/untitled folder 67/launch_codex_webui_unpacked.sh`
+
+### Problem fixed
+
+On newer Codex builds, renderer minification shape changed and launcher failed hard with:
+
+- `Renderer guard patch anchor not found.`
+
+This stopped WebUI startup even when main WebUI runtime patching was successful.
+
+### New behavior
+
+Renderer guard patch is now best-effort:
+
+- If known anchors match, patch is applied and a status log is emitted.
+- If anchor does not match, launcher logs and continues.
+- Mandatory verification now focuses on main runtime marker and bridge payload, not renderer guard marker.
+
+New log signatures:
+
+- `[webui] Renderer guard patch applied (legacy anchor).`
+- `[webui] Renderer guard patch applied (generic guarded anchor).`
+- `[webui] Renderer guard patch applied (roots-map anchor).`
+- `[webui] Renderer guard patch anchor not found; continuing without renderer patch (bundle shape changed).`
+- `[webui] Renderer roots-map pattern not detected; renderer patch not required.`
+
+### Code change summary
+
+Previous terminal failure path:
+
+```js
+console.error("Renderer guard patch anchor not found.");
+process.exit(1);
+```
+
+New non-fatal fallback:
+
+```js
+if (/\.roots\.map\(/.test(source)) {
+  console.error("[webui] Renderer guard patch anchor not found; continuing without renderer patch (bundle shape changed).");
+} else {
+  console.error("[webui] Renderer roots-map pattern not detected; renderer patch not required.");
+}
+process.exit(0);
 ```
 
 ## 14) SSH Autostart Dynamic Target Discovery (Cross-Version)

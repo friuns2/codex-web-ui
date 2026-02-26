@@ -341,7 +341,7 @@ We extracted the `app.asar`, deobfuscated the minified bundles, and traced the e
 |---|---|
 | `EADDRINUSE` | Port already in use — try `--port 6002` |
 | `SSH preflight failed` | Check your SSH key: `ssh -o BatchMode=yes user@host 'echo ok'` |
-| `Renderer guard patch anchor not found` | Bundle version changed — open an issue |
+| `[webui] Renderer guard patch anchor not found; continuing without renderer patch (bundle shape changed).` | Informational on newer bundles; launcher now continues |
 | `Missing app.asar` | Point `--app` to your Codex.app location |
 | Blank page in WebUI | Check console for `roots` error — renderer patch may need updating |
 
