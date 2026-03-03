@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> This project has moved to **[friuns2/codexui](https://github.com/friuns2/codexui)**.
+> Please use the new repository for the latest updates: **https://github.com/friuns2/codexui**.
+
 <div align="center">
 
 # 🌐 Codex App Web UI Enabler
