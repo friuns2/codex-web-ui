@@ -1230,6 +1230,10 @@ echo "Extracting app.asar to: $APP_DIR"
 npx -y @electron/asar extract "$APP_ASAR" "$APP_DIR"
 
 target_main_js_rel="$(sed -nE 's@.*(main-[A-Za-z0-9_-]+\.js).*@\1@p' "$APP_DIR/.vite/build/main.js" | head -n1 || true)"
+if [[ -z "$target_main_js_rel" && -f "$APP_DIR/.vite/build/main.js" ]]; then
+  # Newer Codex builds keep a non-hashed main bundle at .vite/build/main.js.
+  target_main_js_rel="main.js"
+fi
 target_renderer_js_rel="$(sed -nE 's@.*assets/(index-[A-Za-z0-9_-]+\.js).*@\1@p' "$APP_DIR/webview/index.html" | head -n1 || true)"
 [[ -n "$target_main_js_rel" && -n "$target_renderer_js_rel" ]] || { echo "Failed resolving target bundle names" >&2; exit 1; }
 
